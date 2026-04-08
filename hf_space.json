@@ -1,0 +1,9 @@
+{
+  "title": "Smart Delivery Route Optimization",
+  "emoji": "🚚",
+  "colorFrom": "blue",
+  "colorTo": "green",
+  "sdk": "docker",
+  "pinned": false,
+  "hardware": "t4-small"
+}

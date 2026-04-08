@@ -1,0 +1,286 @@
+name: Smart Delivery Route Optimization Environment
+version: 1.0.0
+description: >
+  An OpenEnv-compatible reinforcement learning environment for optimizing
+  delivery routes in a logistics system. The agent learns to minimize total
+  time, fuel consumption, and traffic delays while completing all deliveries.
+
+  This environment simulates realistic logistics challenges including:
+  - Route planning across multiple delivery points
+  - Traffic congestion affecting travel times
+  - Fuel consumption constraints
+  - Time-limited delivery windows
+
+  Tasks range from simple 3-location campus deliveries to complex multi-zone
+  distribution networks with dynamic traffic conditions.
+
+environment:
+  type: delivery_route_optimization
+  framework: gymnasium_like
+  api_version: 1.0.0
+
+api:
+  endpoints:
+    reset:
+      method: POST
+      path: /reset
+      description: Reset environment to initial state for a specific task
+      parameters:
+        - name: task_id
+          type: string
+          required: false
+          default: easy
+          description: Task identifier (easy, medium, hard)
+        - name: seed
+          type: integer
+          required: false
+          description: Random seed for reproducibility
+      returns:
+        state: object
+        observation: object
+        action_space_size: integer
+
+    step:
+      method: POST
+      path: /step
+      description: Execute an action (select next delivery location)
+      parameters:
+        - name: action
+          type: integer
+          required: true
+          description: Index of delivery location to visit next
+          min: 0
+          max: remaining_locations - 1
+      returns:
+        state: object
+        observation: object
+        reward: number
+        done: boolean
+        info: object
+        action_space_size: integer
+
+    state:
+      method: GET
+      path: /state
+      description: Get current environment state
+      returns:
+        state: object
+        observation: object
+        action_space_size: integer
+
+  methods:
+    - name: reset
+      description: Initialize or reinitialize the environment
+      parameters:
+        - name: task_id
+          type: string
+          required: false
+          default: easy
+    - name: step
+      description: Take an action in the environment
+      parameters:
+        - name: action
+          type: integer
+          required: true
+    - name: get_state
+      description: Get current environment state
+    - name: get_observation
+      description: Get normalized observation for agent
+
+state_space:
+  observation:
+    current_location:
+      type: object
+      properties:
+        x:
+          type: float
+          range: [0, map_size]
+          description: X coordinate of current position
+        y:
+          type: float
+          range: [0, map_size]
+          description: Y coordinate of current position
+    remaining_deliveries:
+      type: array
+      items:
+        type: object
+        properties:
+          x:
+            type: float
+            range: [0, map_size]
+          y:
+            type: float
+            range: [0, map_size]
+          traffic:
+            type: float
+            range: [1.0, 3.0]
+            description: Traffic multiplier for this location
+      description: List of undelivered locations with their coordinates and traffic
+    time_elapsed:
+      type: float
+      range: [0, time_limit]
+      description: Total time spent so far
+    fuel_used:
+      type: float
+      range: [0, fuel_limit]
+      description: Total fuel consumed so far
+    progress:
+      type: float
+      range: [0, 1]
+      description: Fraction of deliveries completed
+    action_space_size:
+      type: integer
+      range: [0, num_locations]
+      description: Number of available actions (remaining deliveries)
+
+action_space:
+  type: discrete
+  description: >
+    Select index of next delivery location to visit.
+    The action space size equals the number of remaining delivery locations.
+    Action i means "travel to the i-th remaining delivery location".
+  num_actions: dynamic
+
+tasks:
+  easy:
+    name: Campus Delivery
+    difficulty: easy
+    description: >
+      Simple campus delivery route with 3 locations spread across a small area.
+      No traffic delays. Agent must learn basic route selection.
+    config:
+      num_locations: 3
+      map_size: 50.0
+      traffic_enabled: false
+      time_limit: 200.0
+      fuel_limit: 100.0
+      base_speed: 1.5
+      fuel_per_distance: 0.08
+      seed: 42
+    max_steps: 10
+    reward_threshold: 0.6
+    grading:
+      completion_weight: 0.50
+      time_weight: 0.30
+      fuel_weight: 0.20
+
+  medium:
+    name: City Logistics
+    difficulty: medium
+    description: >
+      Urban delivery route with 6 locations across a city grid.
+      Moderate traffic congestion increases travel time.
+      Agent must balance speed and fuel efficiency under time pressure.
+    config:
+      num_locations: 6
+      map_size: 100.0
+      traffic_enabled: true
+      dynamic_traffic: false
+      time_limit: 300.0
+      fuel_limit: 150.0
+      base_speed: 1.2
+      fuel_per_distance: 0.10
+      seed: 123
+    max_steps: 20
+    reward_threshold: 0.5
+    grading:
+      completion_weight: 0.40
+      time_weight: 0.35
+      fuel_weight: 0.25
+
+  hard:
+    name: Metro Distribution
+    difficulty: hard
+    description: >
+      Complex multi-zone distribution network with 12 delivery points.
+      Dynamic traffic conditions that change throughout the route.
+      Strict fuel and time constraints require optimal route planning.
+      Agent must adapt to changing conditions and prioritize efficiency.
+    config:
+      num_locations: 12
+      map_size: 200.0
+      traffic_enabled: true
+      dynamic_traffic: true
+      time_limit: 400.0
+      fuel_limit: 180.0
+      base_speed: 1.0
+      fuel_per_distance: 0.12
+      seed: 456
+    max_steps: 40
+    reward_threshold: 0.4
+    grading:
+      completion_weight: 0.35
+      time_weight: 0.40
+      fuel_weight: 0.25
+      constraint_violation_penalty: 0.15
+
+reward_function:
+  description: >
+    Reward is bounded between 0.0 and 1.0 for each step. Design balances:
+    - Partial reward for completing deliveries
+    - Efficiency bonus for faster routes
+    - Penalties for fuel consumption and traffic delays
+    - Completion bonus when all deliveries are finished
+
+  components:
+    delivery_reward:
+      value: 0.15
+      description: Base reward for each completed delivery
+    efficiency_bonus:
+      range: [-0.05, 0.10]
+      description: Reward/Penalty based on travel time vs expected
+    fuel_penalty:
+      range: [0, 0.1]
+      description: Penalty proportional to fuel consumption
+    traffic_penalty:
+      range: [0, 0.05]
+      description: Penalty for high traffic conditions
+    completion_bonus:
+      range: [0, 0.45]
+      description: Bonus when all deliveries complete, based on efficiency
+
+grader:
+  description: >
+    Evaluates agent performance based on three metrics:
+    1. Delivery completion rate
+    2. Time efficiency
+    3. Fuel efficiency
+
+  weights_by_task:
+    easy:
+      completion: 0.50
+      time: 0.30
+      fuel: 0.20
+    medium:
+      completion: 0.40
+      time: 0.35
+      fuel: 0.25
+    hard:
+      completion: 0.35
+      time: 0.40
+      fuel: 0.25
+      penalty: 0.15
+
+performance:
+  runtime_constraint_minutes: 20
+  hardware:
+    vcpu: 2
+    ram_gb: 8
+  max_steps_per_episode: 40
+
+metadata:
+  author: OpenEnv Team
+  license: MIT
+  tags:
+    - logistics
+    - route-optimization
+    - reinforcement-learning
+    - delivery
+    - supply-chain
+  examples:
+    - name: Random Agent
+      description: Baseline agent that selects random delivery locations
+    - name: Greedy Agent
+      description: Agent that always selects the nearest unvisited location
+    - name: LLM Agent
+      description: Agent powered by large language model for route planning
