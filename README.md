@@ -1,3 +1,13 @@
+---
+title: Delivery Route OpenEnv
+emoji: 🚚
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 # Smart Delivery Route Optimization Environment
 
 A production-ready OpenEnv-compatible reinforcement learning environment for optimizing delivery routes in a logistics system. The agent learns to minimize total time, fuel consumption, and traffic delays while completing all deliveries.
