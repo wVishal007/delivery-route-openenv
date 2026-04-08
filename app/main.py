@@ -1,12 +1,12 @@
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import uvicorn
 
 from app.env import DeliveryRouteEnv
 from app.tasks import TASK_REGISTRY, get_task, get_all_tasks
-from app.grader import TrajectoryTracker, grade_task, get_score_breakdown
+from app.grader import TrajectoryTracker, grade_task
 
 
 app = FastAPI(
@@ -28,13 +28,8 @@ trajectory_tracker: Optional[TrajectoryTracker] = None
 current_task_id: Optional[str] = None
 
 
-class ResetRequest(BaseModel):
-    task_id: str = Field(default="easy")
-    seed: Optional[int] = Field(default=None)
-
-
 class StepRequest(BaseModel):
-    action: int = Field(..., ge=0)
+    action: int
 
 
 class EnvResponse(BaseModel):
@@ -64,21 +59,20 @@ def health():
     }
 
 
-@app.get("/reset", response_model=EnvResponse)
-def reset_get(
-    task_id: str = Query(default="easy", description="Task ID: easy, medium, or hard"),
-    seed: Optional[int] = Query(default=None, description="Random seed")
+@app.post("/reset")
+@app.get("/reset")
+def reset_endpoint(
+    task_id: Optional[str] = Query(default="easy", description="Task ID: easy, medium, or hard"),
+    seed: Optional[int] = Query(default=None, description="Random seed"),
+    body: Optional[Dict[str, Any]] = Body(default=None)
 ):
-    return _do_reset(task_id, seed)
-
-
-@app.post("/reset", response_model=EnvResponse)
-def reset_post(request: ResetRequest):
-    return _do_reset(request.task_id, request.seed)
-
-
-def _do_reset(task_id: str, seed: Optional[int]) -> EnvResponse:
     global env, trajectory_tracker, current_task_id
+    
+    if body is not None:
+        if task_id == "easy" and "task_id" in body:
+            task_id = body.get("task_id")
+        if seed is None and "seed" in body:
+            seed = body.get("seed")
     
     try:
         task = get_task(task_id)
@@ -94,36 +88,36 @@ def _do_reset(task_id: str, seed: Optional[int]) -> EnvResponse:
         trajectory_tracker.finalize(task_id, config)
         current_task_id = task_id
         
-        return EnvResponse(
-            state=state.to_dict(),
-            action_space_size=env.get_action_space()
-        )
+        return {
+            "state": state.to_dict(),
+            "action_space_size": env.get_action_space()
+        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Reset failed: {str(e)}")
 
 
-@app.get("/state", response_model=EnvResponse)
+@app.get("/state")
 def get_state():
     if env is None or env.get_state() is None:
         raise HTTPException(status_code=400, detail="Environment not initialized. Call /reset first.")
     
-    return EnvResponse(
-        state=env.get_state().to_dict(),
-        action_space_size=env.get_action_space()
-    )
+    return {
+        "state": env.get_state().to_dict(),
+        "action_space_size": env.get_action_space()
+    }
 
 
-@app.post("/step", response_model=StepResponse)
-def step_action(request: StepRequest):
+@app.post("/step")
+def step_action(body: StepRequest):
     global env, trajectory_tracker
     
     if env is None or env.get_state() is None:
         raise HTTPException(status_code=400, detail="Environment not initialized. Call /reset first.")
     
     try:
-        action = request.action
+        action = body.action
         state, reward, done, info = env.step(action)
         
         if trajectory_tracker is not None:
@@ -134,13 +128,13 @@ def step_action(request: StepRequest):
                 info=info
             )
         
-        return StepResponse(
-            state=state.to_dict(),
-            reward=reward,
-            done=done,
-            info=info,
-            action_space_size=env.get_action_space()
-        )
+        return {
+            "state": state.to_dict(),
+            "reward": reward,
+            "done": done,
+            "info": info,
+            "action_space_size": env.get_action_space()
+        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
