@@ -1,16 +1,16 @@
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
-from app.env import DeliveryRouteEnv, DeliveryState
-from app.tasks import TASK_REGISTRY, get_task, get_task_config
+from app.env import DeliveryRouteEnv
+from app.tasks import TASK_REGISTRY, get_task, get_all_tasks
 from app.grader import TrajectoryTracker, grade_task, get_score_breakdown
 
 
 app = FastAPI(
-    title="Smart Delivery Route Optimization Environment",
+    title="Smart Delivery Route Optimization",
     description="OpenEnv-compatible RL environment for delivery route optimization",
     version="1.0.0"
 )
@@ -23,100 +23,62 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_current_env: Optional[DeliveryRouteEnv] = None
-_trajectory_tracker: Optional[TrajectoryTracker] = None
+env: Optional[DeliveryRouteEnv] = None
+trajectory_tracker: Optional[TrajectoryTracker] = None
+current_task_id: Optional[str] = None
 
 
 class ResetRequest(BaseModel):
-    task_id: str = Field(default="easy", description="Task ID to reset the environment with")
-    seed: Optional[int] = Field(default=None, description="Random seed for reproducibility")
+    task_id: str = Field(default="easy")
+    seed: Optional[int] = Field(default=None)
 
 
 class StepRequest(BaseModel):
-    action: int = Field(..., description="Action (index of delivery location to visit)")
+    action: int = Field(..., ge=0)
 
 
 class EnvResponse(BaseModel):
     state: Dict[str, Any]
-    observation: Dict[str, Any]
     action_space_size: int
 
 
 class StepResponse(BaseModel):
     state: Dict[str, Any]
-    observation: Dict[str, Any]
     reward: float
     done: bool
     info: Dict[str, Any]
     action_space_size: int
 
 
-class TaskInfo(BaseModel):
-    task_id: str
-    name: str
-    description: str
-    difficulty: str
-    max_steps: int
-    reward_threshold: float
-
-
-class TaskListResponse(BaseModel):
-    tasks: List[TaskInfo]
-    total: int
-
-
-class GradingResponse(BaseModel):
-    score: float
-    completion_score: float
-    time_score: float
-    fuel_score: float
-    details: Dict[str, Any]
-
-
 @app.get("/")
-async def root():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "service": "Smart Delivery Route Optimization Environment",
-        "version": "1.0.0",
-        "openenv_compatible": True
-    }
+def root():
+    return {"status": "ok", "message": "Delivery Route Optimization API is running"}
 
 
 @app.get("/health")
-async def health():
-    """Detailed health check."""
+def health():
     return {
         "status": "healthy",
-        "environment_initialized": _current_env is not None,
-        "trajectory_tracking": _trajectory_tracker is not None
+        "environment_initialized": env is not None,
+        "task_id": current_task_id
     }
 
 
-@app.post("/reset", response_model=EnvResponse)
-async def reset_post(request: ResetRequest):
-    """
-    Reset the environment to initial state.
-    
-    This initializes or reinitializes the environment with the specified task.
-    """
-    return await _do_reset(request.task_id, request.seed)
-
-
 @app.get("/reset", response_model=EnvResponse)
-async def reset_get(task_id: str = "easy", seed: Optional[int] = None):
-    """
-    Reset the environment to initial state (GET method).
-    
-    This initializes or reinitializes the environment with the specified task.
-    """
-    return await _do_reset(task_id, seed)
+def reset_get(
+    task_id: str = Query(default="easy", description="Task ID: easy, medium, or hard"),
+    seed: Optional[int] = Query(default=None, description="Random seed")
+):
+    return _do_reset(task_id, seed)
 
 
-async def _do_reset(task_id: str, seed: Optional[int]) -> EnvResponse:
-    """Internal reset logic shared by both GET and POST."""
-    global _current_env, _trajectory_tracker
+@app.post("/reset", response_model=EnvResponse)
+def reset_post(request: ResetRequest):
+    return _do_reset(request.task_id, request.seed)
+
+
+def _do_reset(task_id: str, seed: Optional[int]) -> EnvResponse:
+    global env, trajectory_tracker, current_task_id
     
     try:
         task = get_task(task_id)
@@ -125,16 +87,16 @@ async def _do_reset(task_id: str, seed: Optional[int]) -> EnvResponse:
         if seed is not None:
             config["seed"] = seed
         
-        _current_env = DeliveryRouteEnv(task_config=config)
-        state = _current_env.reset(task_id=task_id)
+        env = DeliveryRouteEnv(task_config=config)
+        state = env.reset(task_id=task_id)
         
-        _trajectory_tracker = TrajectoryTracker()
-        _trajectory_tracker.finalize(task_id, config)
+        trajectory_tracker = TrajectoryTracker()
+        trajectory_tracker.finalize(task_id, config)
+        current_task_id = task_id
         
         return EnvResponse(
             state=state.to_dict(),
-            observation=_current_env.get_observation(),
-            action_space_size=_current_env.get_action_space()
+            action_space_size=env.get_action_space()
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -143,51 +105,29 @@ async def _do_reset(task_id: str, seed: Optional[int]) -> EnvResponse:
 
 
 @app.get("/state", response_model=EnvResponse)
-async def state():
-    """
-    Get the current state of the environment.
-    
-    Returns the full state dictionary, observation, and action space size.
-    """
-    global _current_env, _trajectory_tracker
-    
-    if _current_env is None or _current_env.get_state() is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Environment not initialized. Call /reset first."
-        )
-    
-    current_state = _current_env.get_state()
+def get_state():
+    if env is None or env.get_state() is None:
+        raise HTTPException(status_code=400, detail="Environment not initialized. Call /reset first.")
     
     return EnvResponse(
-        state=current_state.to_dict(),
-        observation=_current_env.get_observation(),
-        action_space_size=_current_env.get_action_space()
+        state=env.get_state().to_dict(),
+        action_space_size=env.get_action_space()
     )
 
 
 @app.post("/step", response_model=StepResponse)
-async def step(request: StepRequest):
-    """
-    Execute an action in the environment.
+def step_action(request: StepRequest):
+    global env, trajectory_tracker
     
-    Takes an action (delivery location index) and returns the new state,
-    reward, done flag, and additional information.
-    """
-    global _current_env, _trajectory_tracker
-    
-    if _current_env is None or _current_env.get_state() is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Environment not initialized. Call /reset first."
-        )
+    if env is None or env.get_state() is None:
+        raise HTTPException(status_code=400, detail="Environment not initialized. Call /reset first.")
     
     try:
         action = request.action
-        state, reward, done, info = _current_env.step(action)
+        state, reward, done, info = env.step(action)
         
-        if _trajectory_tracker is not None:
-            _trajectory_tracker.record_step(
+        if trajectory_tracker is not None:
+            trajectory_tracker.record_step(
                 state=state.to_dict(),
                 action=action,
                 reward=reward,
@@ -196,11 +136,10 @@ async def step(request: StepRequest):
         
         return StepResponse(
             state=state.to_dict(),
-            observation=_current_env.get_observation(),
             reward=reward,
             done=done,
             info=info,
-            action_space_size=_current_env.get_action_space()
+            action_space_size=env.get_action_space()
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -208,108 +147,48 @@ async def step(request: StepRequest):
         raise HTTPException(status_code=500, detail=f"Step failed: {str(e)}")
 
 
-@app.get("/tasks", response_model=TaskListResponse)
-async def list_tasks():
-    """
-    List all available tasks.
-    
-    Returns information about each task including difficulty and thresholds.
-    """
-    tasks = TASK_REGISTRY.get_all_tasks()
-    
-    task_infos = [
-        TaskInfo(
-            task_id=t.task_id,
-            name=t.name,
-            description=t.description,
-            difficulty=t.difficulty,
-            max_steps=t.max_steps,
-            reward_threshold=t.reward_threshold
-        )
-        for t in tasks
-    ]
-    
-    return TaskListResponse(tasks=task_infos, total=len(task_infos))
+@app.get("/tasks")
+def list_tasks():
+    tasks = get_all_tasks()
+    return {
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "name": t.name,
+                "description": t.description,
+                "difficulty": t.difficulty
+            }
+            for t in tasks
+        ]
+    }
 
 
-@app.get("/tasks/{task_id}", response_model=TaskInfo)
-async def get_task_info(task_id: str):
-    """Get detailed information about a specific task."""
-    try:
-        task = get_task(task_id)
-        return TaskInfo(
-            task_id=task.task_id,
-            name=task.name,
-            description=task.description,
-            difficulty=task.difficulty,
-            max_steps=task.max_steps,
-            reward_threshold=task.reward_threshold
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-@app.get("/grade", response_model=GradingResponse)
-async def grade_trajectory():
-    """
-    Grade the current trajectory.
+@app.get("/grade")
+def grade():
+    global trajectory_tracker, current_task_id
     
-    Returns the score based on delivery completion, time efficiency,
-    and fuel efficiency metrics.
-    """
-    global _trajectory_tracker
+    if trajectory_tracker is None or current_task_id is None:
+        raise HTTPException(status_code=400, detail="No trajectory to grade. Complete episodes first.")
     
-    if _trajectory_tracker is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No trajectory to grade. Complete episodes first."
-        )
+    trajectory = trajectory_tracker.to_trajectory_dict()
+    result = grade_task(trajectory, current_task_id)
     
-    trajectory = _trajectory_tracker.to_trajectory_dict()
-    result = grade_task(trajectory, trajectory["task_id"])
-    
-    return GradingResponse(
-        score=result.score,
-        completion_score=result.completion_score,
-        time_score=result.time_score,
-        fuel_score=result.fuel_score,
-        details=result.details
-    )
+    return {
+        "score": result.score,
+        "completion_score": result.completion_score,
+        "time_score": result.time_score,
+        "fuel_score": result.fuel_score
+    }
 
 
 @app.get("/trajectory")
-async def get_trajectory():
-    """Get the current trajectory data."""
-    global _trajectory_tracker
+def get_trajectory():
+    global trajectory_tracker
     
-    if _trajectory_tracker is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No trajectory recorded. Complete episodes first."
-        )
+    if trajectory_tracker is None:
+        raise HTTPException(status_code=400, detail="No trajectory recorded.")
     
-    return _trajectory_tracker.to_trajectory_dict()
-
-
-@app.get("/score-breakdown")
-async def get_trajectory_breakdown():
-    """Get detailed score breakdown for the current trajectory."""
-    global _trajectory_tracker
-    
-    if _trajectory_tracker is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No trajectory to analyze. Complete episodes first."
-        )
-    
-    trajectory = _trajectory_tracker.to_trajectory_dict()
-    breakdown = get_score_breakdown(trajectory)
-    
-    return {
-        "completion": round(breakdown["completion"], 4),
-        "time": round(breakdown["time"], 4),
-        "fuel": round(breakdown["fuel"], 4)
-    }
+    return trajectory_tracker.to_trajectory_dict()
 
 
 if __name__ == "__main__":
